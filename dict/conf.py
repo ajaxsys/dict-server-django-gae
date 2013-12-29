@@ -9,10 +9,7 @@ weblio_small = {
     'fetch_url' : 'http://ejje.weblio.jp/small/content/#key#',
     'ua' : UA_IOS_6,
 }
-google_jp = {
-    'fetch_url' : 'https://www.google.co.jp/search?q=#key#',
-    'ua' : UA_IOS_6,
-}
+
 ewords = {
     'fetch_url' : 'http://e-words.jp/w/#key#.html',
     'ua' : UA_IOS_6,
@@ -27,12 +24,11 @@ wiki_jp = {
 # Rules for fetching URLs
 fetch_rules = {
     'weblio_small':[
-        weblio_small, google_jp
+        weblio_small
     ],
     'weblio':[
-        weblio_sp, google_jp
+        weblio_sp
     ],
-    'google_jp': [google_jp],
     'wiki_jp': [wiki_jp],
 }
 

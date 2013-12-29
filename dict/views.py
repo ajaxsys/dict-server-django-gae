@@ -2,19 +2,18 @@ import urllib2
 import re
 import logging
 import conf
-
 import json
 
-from django.http import HttpResponse
-from django.http import HttpResponseRedirect
-from django.http import Http404
+from threading import Thread
+
+from django.http import HttpResponse, HttpResponseRedirect, Http404
 
 #from django.template import RequestContext, loader
 from django.shortcuts import render, get_object_or_404
 from django.core.urlresolvers import reverse
+from django.core.exceptions import ObjectDoesNotExist
 
-from dict.models import Weblio,Weblio_Small,Wiktionary,Ewords,Wiki_JP
-
+from dict.models import Weblio, Weblio_Small, Wiktionary, Ewords, Wiki_JP
 
 
 logger = logging.getLogger('dict')
@@ -29,7 +28,15 @@ def index(request):
 def query(request, dict_type, key):
     key = cleanKey(key)
 
+    global DB_MODE
+    if request.GET.get('DB_MODE') is not None:
+        DB_MODE = False
+        logger.warn("Skip db")
+    else:
+        DB_MODE = True
+
     word = getWordFromDB(dict_type, key)
+    
     if word is not None:
         #print "db"
         logger.info( "Read key `%s` from local DB: %s", key, dict_type )
@@ -37,7 +44,7 @@ def query(request, dict_type, key):
         # Get from internet
         word = fetchURL(dict_type, key)
         if word is not None :
-            saveWordToDB(dict_type, word)
+            saveWordToDBWithNewThread(dict_type, word)
         else:
             #raise Http404
             word = {'word': key,'explain': 'Not found', 'reference':'local&internet'}
@@ -62,18 +69,14 @@ def query(request, dict_type, key):
         }
         return HttpResponse(callback+'('+json.dumps(context)+')', mimetype="application/javascript; charset=utf-8")
 
-#########################
+########################################################################################
 # Private functions
-#########################
+########################################################################################
 class Struct:
     def __init__(self, **entries): 
         self.__dict__.update(entries)
 
 def cleanKey(key):
-    newKey = key.lower().strip()
-    if key != newKey:
-        logger.info("Change key FROM %s TO %s", key, newKey)
-
     return key.lower().strip()
 
 
@@ -98,7 +101,7 @@ def fetchURL(dict_type, key):
     # encode: string <-- unicode
     fetchKey = urllib2.quote(key.encode('utf8'))
     for fetchUrl in fetchUrls:
-        # Change UA
+        # Change UA, but UA always contain:  AppEngine-Google; (+http://code.google.com/appengine)
         hdr['User-Agent']=fetchUrl['ua']
         # Get URL
         url = fetchUrl['fetch_url'].replace('#key#',fetchKey)
@@ -109,7 +112,7 @@ def fetchURL(dict_type, key):
             response = urllib2.urlopen(req)
             html = response.read()
             # whatisthis(html) # ordinary string
-            logger.debug( "html: \n" + html )
+            #logger.debug( "html: \n" + html )
             if html is not None:
                 return {
                     'word': key,
@@ -127,7 +130,7 @@ def fetchURL(dict_type, key):
             continue
     return None
 
-def getWordFromDB(dict_type,key) :
+def getWordFromDB(dict_type, key) :
     if not DB_MODE : 
         return None
     try:
@@ -150,35 +153,44 @@ def getWordFromDB(dict_type,key) :
             #print "Ingnore getWordFromDB" + dict_type
             logger.warn("Ingnore getWordFromDB" + dict_type)
             return None
-    except (Weblio.DoesNotExist, Weblio_Small.DoesNotExist, Ewords.DoesNotExist, Wiktionary.DoesNotExist, Wiki_JP.DoesNotExist):
+    except ObjectDoesNotExist:
+        logger.info("Can not fine in local db")
         return None
 
-
-def saveWordToDB(dict_type, record):
+def saveWordToDBWithNewThread(dict_type, record):
     if not DB_MODE : 
         return None
+    # The dev_appserver does not emulate the threading behavior of the production servers
+    # from:http://stackoverflow.com/questions/9351719/gae-python-threads-not-executing-in-parallel
+    thread = Thread(target = saveWordToDB, args = (dict_type, record, ))
+    thread.start()
+
+def saveWordToDB(dict_type, record):
     # record is dictionary in python
     #print "Save to DB:" + dict_type + ". word:" + record['word']
     logger.info("Save to DB:" + dict_type + ". word:" + record['word'])
 
     # print ". explian: " + record.get('explain')
     # print "Refer:" + record.get('reference')
+    try:
+        if isTable(dict_type, Weblio) :
+            obj = Weblio(word=record['word'], explain=record['explain'], reference=record['reference'])
+        elif isTable(dict_type, Weblio_Small) :
+            obj = Weblio_Small(word=record['word'], explain=record['explain'], reference=record['reference'])
+        elif isTable(dict_type, Ewords) :
+            obj = Ewords(word=record['word'], explain=record['explain'], reference=record['reference'])
+        elif isTable(dict_type, Wiktionary) :
+            obj = Wiktionary(word=record['word'], explain=record['explain'], reference=record['reference'])
+        elif isTable(dict_type, Wiki_JP) :
+            obj = Wiki_JP(word=record['word'], explain=record['explain'], reference=record['reference'])
+        else: 
+            #print "Ingnore saveWordToDB" + dict_type
+            logger.warn("Ingnore saveWordToDB" + dict_type) 
+            return None
 
-    if isTable(dict_type, Weblio) :
-        obj = Weblio(word=record['word'], explain=record['explain'], reference=record['reference'])
-    elif isTable(dict_type, Weblio_Small) :
-        obj = Weblio_Small(word=record['word'], explain=record['explain'], reference=record['reference'])
-    elif isTable(dict_type, Ewords) :
-        obj = Ewords(word=record['word'], explain=record['explain'], reference=record['reference'])
-    elif isTable(dict_type, Wiktionary) :
-        obj = Wiktionary(word=record['word'], explain=record['explain'], reference=record['reference'])
-    elif isTable(dict_type, Wiki_JP) :
-        obj = Wiki_JP(word=record['word'], explain=record['explain'], reference=record['reference'])
-    else: 
-        #print "Ingnore saveWordToDB" + dict_type
-        logger.warn("Ingnore saveWordToDB" + dict_type) 
-        return None
-    obj.save()
+        obj.save()
+    except Exception as e:
+        logger.error('%s (%s)' % (e.message, type(e)))
 
 def isTable(table_name, clazz):
     return table_name.lower() == clazz.__name__.lower()
@@ -192,10 +204,10 @@ def toJSStr(str) :
 
 def whatisthis(s):
     if isinstance(s, str):
-        print "ordinary string"
+        return "ordinary string"
     elif isinstance(s, unicode):
-        print "unicode string"
+        return "unicode string"
     else:
-        print "not a string"
+        return "not a string"
 
 
