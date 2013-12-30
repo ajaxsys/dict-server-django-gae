@@ -3,7 +3,7 @@ UA_IOS_6='Mozilla/5.0 (iPhone; CPU iPhone OS 6_0 like Mac OS X) AppleWebKit/536.
 
 weblio_sp = {
     'fetch_url' : 'http://ejje.weblio.jp/content/#key#',
-    'ua' : UA_IOS_5,
+    'ua' : UA_IOS_6,
 }
 weblio_small = {
     'fetch_url' : 'http://ejje.weblio.jp/small/content/#key#',
@@ -23,6 +23,7 @@ wiki_jp = {
 
 # Rules for fetching URLs
 fetch_rules = {
+    #deprecated
     'weblio_small':[
         weblio_small
     ],

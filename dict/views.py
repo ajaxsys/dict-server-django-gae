@@ -15,10 +15,9 @@ from django.core.exceptions import ObjectDoesNotExist
 
 from dict.models import Weblio, Weblio_Small, Wiktionary, Ewords, Wiki_JP
 
+from google.appengine.api import urlfetch
 
 logger = logging.getLogger('dict')
-#If read/write to DB
-DB_MODE = True
 
 
 def index(request):
@@ -26,16 +25,17 @@ def index(request):
     return render(request, 'dict/index.html', context)
 
 def query(request, dict_type, key):
+
     key = cleanKey(key)
 
-    global DB_MODE
+    #If read/write to DB
     if request.GET.get('DB_MODE') is not None:
         DB_MODE = False
         logger.warn("Skip db")
     else:
         DB_MODE = True
 
-    word = getWordFromDB(dict_type, key)
+    word = getWordFromDB(dict_type, key, DB_MODE)
     
     if word is not None:
         #print "db"
@@ -44,7 +44,7 @@ def query(request, dict_type, key):
         # Get from internet
         word = fetchURL(dict_type, key)
         if word is not None :
-            saveWordToDBWithNewThread(dict_type, word)
+            saveWordToDBWithNewThread(dict_type, word, DB_MODE)
         else:
             #raise Http404
             word = {'word': key,'explain': 'Not found', 'reference':'local&internet'}
@@ -82,14 +82,16 @@ def cleanKey(key):
 
 def fetchURL(dict_type, key):
     logger.info( "Fetch %s from internet. (%s)", key, dict_type)
+    #Set google url fetch timer
+    urlfetch.set_default_fetch_deadline(28)
 
     #fetchUrls = FetchURL.objects.filter(dict_name=dict_type).order_by('-level')
     fetchUrls = conf.fetch_urls(dict_type)
     if fetchUrls is None :
         return None
-    #`q=` is called `relative quality factor`.
+
+    # Way1
     hdr = {
-        'User-Agent': '',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
         'Accept-Charset': 'utf-8,shift-JIS;q=0.7,*;q=0.3',
         'Accept-Encoding': 'none',
@@ -97,22 +99,42 @@ def fetchURL(dict_type, key):
         'Connection': 'keep-alive'
     }
 
+    # Way2
+    opener = urllib2.build_opener()
+    #opener.addheaders = [('User-agent', 'Mozilla/5.0')]
+    opener.addheaders = [('Accept', 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8')]
+    opener.addheaders = [('Accept-Charset', 'utf-8,shift-JIS;q=0.7,*;q=0.3')]
+    opener.addheaders = [('Accept-Language', 'ja,en-us,*;q=0.3')]
+    opener.addheaders = [('Connection', 'keep-alive')]
+
     # decode: string --> unicode
     # encode: string <-- unicode
     fetchKey = urllib2.quote(key.encode('utf8'))
     for fetchUrl in fetchUrls:
         # Change UA, but UA always contain:  AppEngine-Google; (+http://code.google.com/appengine)
-        hdr['User-Agent']=fetchUrl['ua']
+        UA = fetchUrl['ua']
+        
+        # Way1
+        hdr['User-Agent']=UA
+        # Way2
+        opener.addheaders = [('User-agent', UA)]
+        urllib2.install_opener(opener)
+        #infile = opener.open(url)
+
         # Get URL
         url = fetchUrl['fetch_url'].replace('#key#',fetchKey)
+
+        logger.info("============================>")
         logger.info( "Fetching url: %s " , url )
+        logger.info(UA)
+
         req = urllib2.Request(url, headers=hdr)
 
         try:
-            response = urllib2.urlopen(req)
-            html = response.read()
+            html = urllib2.urlopen(url).read()
             # whatisthis(html) # ordinary string
             #logger.debug( "html: \n" + html )
+            
             if html is not None:
                 return {
                     'word': key,
@@ -125,12 +147,15 @@ def fetchURL(dict_type, key):
         except urllib2.HTTPError, e:
             logger.error("********ERROR******** \n" + e.fp.read() + "\n********ERROR********")
             continue
-        except (Http404):
+        except Http404:
             logger.error("HTTP ERROR 404")
+            continue
+        except Exception as e:
+            logger.error('%s (%s)' % (e.message, type(e)))
             continue
     return None
 
-def getWordFromDB(dict_type, key) :
+def getWordFromDB(dict_type, key, DB_MODE) :
     if not DB_MODE : 
         return None
     try:
@@ -154,16 +179,20 @@ def getWordFromDB(dict_type, key) :
             logger.warn("Ingnore getWordFromDB" + dict_type)
             return None
     except ObjectDoesNotExist:
-        logger.info("Can not fine in local db")
+        logger.info("Not found from local db")
         return None
 
-def saveWordToDBWithNewThread(dict_type, record):
+def saveWordToDBWithNewThread(dict_type, record, DB_MODE):
     if not DB_MODE : 
         return None
-    # The dev_appserver does not emulate the threading behavior of the production servers
-    # from:http://stackoverflow.com/questions/9351719/gae-python-threads-not-executing-in-parallel
-    thread = Thread(target = saveWordToDB, args = (dict_type, record, ))
-    thread.start()
+    try:
+        # The dev_appserver does not emulate the threading behavior of the production servers
+        # from:http://stackoverflow.com/questions/9351719/gae-python-threads-not-executing-in-parallel
+        #saveWordToDB(dict_type, record, )
+        thread = Thread(target = saveWordToDB, args = (dict_type, record))
+        thread.start()
+    except Exception as e:
+        logger.error('Save DB Failed. %s (%s)' % (e.message, type(e)))
 
 def saveWordToDB(dict_type, record):
     # record is dictionary in python
@@ -172,25 +201,23 @@ def saveWordToDB(dict_type, record):
 
     # print ". explian: " + record.get('explain')
     # print "Refer:" + record.get('reference')
-    try:
-        if isTable(dict_type, Weblio) :
-            obj = Weblio(word=record['word'], explain=record['explain'], reference=record['reference'])
-        elif isTable(dict_type, Weblio_Small) :
-            obj = Weblio_Small(word=record['word'], explain=record['explain'], reference=record['reference'])
-        elif isTable(dict_type, Ewords) :
-            obj = Ewords(word=record['word'], explain=record['explain'], reference=record['reference'])
-        elif isTable(dict_type, Wiktionary) :
-            obj = Wiktionary(word=record['word'], explain=record['explain'], reference=record['reference'])
-        elif isTable(dict_type, Wiki_JP) :
-            obj = Wiki_JP(word=record['word'], explain=record['explain'], reference=record['reference'])
-        else: 
-            #print "Ingnore saveWordToDB" + dict_type
-            logger.warn("Ingnore saveWordToDB" + dict_type) 
-            return None
 
-        obj.save()
-    except Exception as e:
-        logger.error('%s (%s)' % (e.message, type(e)))
+    if isTable(dict_type, Weblio) :
+        obj = Weblio(word=record['word'], explain=record['explain'], reference=record['reference'])
+    elif isTable(dict_type, Weblio_Small) :
+        obj = Weblio_Small(word=record['word'], explain=record['explain'], reference=record['reference'])
+    elif isTable(dict_type, Ewords) :
+        obj = Ewords(word=record['word'], explain=record['explain'], reference=record['reference'])
+    elif isTable(dict_type, Wiktionary) :
+        obj = Wiktionary(word=record['word'], explain=record['explain'], reference=record['reference'])
+    elif isTable(dict_type, Wiki_JP) :
+        obj = Wiki_JP(word=record['word'], explain=record['explain'], reference=record['reference'])
+    else: 
+        #print "Ingnore saveWordToDB" + dict_type
+        logger.warn("Ingnore saveWordToDB" + dict_type) 
+        return None
+    obj.save()
+
 
 def isTable(table_name, clazz):
     return table_name.lower() == clazz.__name__.lower()

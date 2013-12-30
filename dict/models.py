@@ -4,7 +4,7 @@ from django.db import models
 
 class Dict(models.Model):
     #word_id = models.AutoField(primary_key=True)
-    word = models.CharField(max_length=200, db_index=True, unique=True)
+    word = models.CharField(max_length=200, db_index=True, unique=True, primary_key=True)
     # 100kb
     explain = models.TextField(max_length=102400)
     # 4kb
